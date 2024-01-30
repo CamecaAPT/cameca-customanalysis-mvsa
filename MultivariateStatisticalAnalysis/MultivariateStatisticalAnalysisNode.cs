@@ -1,5 +1,6 @@
 ﻿using Cameca.CustomAnalysis.Interface;
 using Cameca.CustomAnalysis.Utilities;
+using CommunityToolkit.HighPerformance;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -29,40 +30,56 @@ internal class MultivariateStatisticalAnalysisNode : AnalysisFilterNodeBase
 
         // Our analysis philosophy is to generally compute on-demand
         // Ideally, this would be the spot where the input data could be passed to MATLAB, and MATLAB could return a phase identifier array or other data to be used for the filtering
+        // This is a little tricky to get at trivially, as our IIonData instance are accessed through a sequence of chunks of data
+        // This is mainly to circumvent issues with hitting single object size caps in C# and limits on array length (i.e. support data sets with ion counts > Int32.MaxValue)
+        // There should be some samples on the GitHub if necessary, but it's probably safe to just assume < 2 billion ions and load all into arrays
+        // Note that this could fail on massive datasets if not eventually adjusted to support them
+        Vector3[] positions = new Vector3[(int)ownerIonData.IonCount];
+        float[] masses = new float[(int)ownerIonData.IonCount];
+        int chunkOffset = 0;
+        foreach (var chunk in ownerIonData.CreateSectionDataEnumerable(IonDataSectionName.Position, IonDataSectionName.Mass))
+        {
+            var chunkPos = chunk.ReadSectionData<Vector3>(IonDataSectionName.Position);
+            var chunkMas = chunk.ReadSectionData<float>(IonDataSectionName.Mass);
+            chunkPos.Span.CopyTo(positions.AsSpan().Slice(chunkOffset));
+            chunkMas.Span.CopyTo(masses.AsSpan().Slice(chunkOffset));
+            chunkOffset += (int)chunk.Length;
+        }
 
         /*
         using (dynamic eng = MATLABEngine.StartMATLAB())
         {
             RunOptions opts = new RunOptions() { Nargout = 0 };
+
+            // positions and masses could be converted MATLAB types and passed to the function
+
             eng.callAPTgui(opts);
+
+            // A lot of different things could be returned, but for the purpose of this example
+            // probably just return voxel centers and phase. Ideally voxel metadata as well such as size and extants
+            // Then the LoadFromVoxelFile method can essentially be replaced with this information
         }
         MATLABEngine.TerminateEngineClient();
         */
 
         // And at this point we have the phase information for applying back to the ions
 
-        // Our IIonData instance are accessed through a sequence of chunks of data
-        // This is mainly to circumvent issues with hitting single object size caps in C# and limits on array length (i.e. support data sets with ion counts > Int32.MaxValue)
         ulong index = 0L;
-        foreach (var chunk in ownerIonData.CreateSectionDataEnumerable(IonDataSectionName.Position))
+        // I'll just allocate a large enough array, then return only what we need
+        var filteredIndices = new ulong[positions.Length];
+        int filterCount = 0;
+        for (var i = 0; i < positions.Length; i++)
         {
-            var indexBuffer = new ulong[chunk.Length];
-            int bufferIndex = 0;
-            var positions = chunk.ReadSectionData<Vector3>(IonDataSectionName.Position).Span;
-            for (var i = 0; i < chunk.Length; i++)
+            // For each ion in the chuck, determine if we want to include it in filtered data by comparing the mapped phase by voxel to the selected phase
+            // If external MATLAB functions are called in this filter function first, then this PhaseMapper object can probably be replace eventually by
+            // directly returned data structures from the external function call
+            if (phaseMapper.GetPhase(positions[i]) == phase)
             {
-                // For each ion in the chuck, determine if we want to include it in filtered data by comparing the mapped phase by voxel to the selected phase
-                // If external MATLAB functions are called in this filter function first, then this PhaseMapper object can probably be replace eventually by
-                // directly returned data structures from the external function call
-                if (phaseMapper.GetPhase(positions[i]) == phase)
-                {
-                    indexBuffer[bufferIndex++] = index;
-                }
-                index++;
+                filteredIndices[filterCount++] = index;
             }
-            // Each array of indices for the currently considered chunk of ions can be yielded back to AP Suite one at a time
-            yield return indexBuffer[..bufferIndex];
+            index++;
         }
+        yield return filteredIndices[..filterCount];
     }
 
     internal void LoadFromVoxelFile(string voxelFilePath, Vector3 voxelSize, bool flipXY = false)
@@ -103,6 +120,7 @@ internal class MultivariateStatisticalAnalysisNode : AnalysisFilterNodeBase
         }
         // Store the object on the node: By storing on the Node, we don't need to keep the file loading UI open.
         this.phaseMapper = phaseMapper;
+        DataStateIsValid = false;
     }
 
     /// <summary>
