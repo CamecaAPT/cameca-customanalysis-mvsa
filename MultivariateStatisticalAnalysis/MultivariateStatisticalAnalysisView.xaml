@@ -6,8 +6,47 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
              xmlns:local="clr-namespace:MultivariateStatisticalAnalysis"
              mc:Ignorable="d" 
-             d:DesignHeight="450" d:DesignWidth="800">
+             d:DesignHeight="450" d:DesignWidth="800"
+             d:DataContext="{d:DesignInstance Type={x:Type local:MultivariateStatisticalAnalysisViewModel}}">
     <Grid>
-            
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <StackPanel Grid.Row="0" Orientation="Vertical">
+            <!--File Selection-->
+            <TextBlock Text="Voxel APT File" />
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBox Grid.Column="0" Text="{Binding VoxelFilePath}" />
+                <Button Grid.Column="1" Command="{Binding BrowseVoxelFileCommand}" Content="Browse" />
+            </Grid>
+
+            <!--Voxel Size-->
+            <TextBlock Text="Voxel Size" />
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="40" />
+                </Grid.ColumnDefinitions>
+                <Label Grid.Row="0" Grid.Column="0" Target="{Binding ElementName=VoxelSizeX}">X</Label>
+                <TextBox Grid.Row="0" Grid.Column="1" x:Name="VoxelSizeX" Text="{Binding VoxelDimensionX}" />
+                <Label Grid.Row="1" Grid.Column="0" Target="{Binding ElementName=VoxelSizeY}">Y</Label>
+                <TextBox Grid.Row="1" Grid.Column="1" x:Name="VoxelSizeY" Text="{Binding VoxelDimensionY}" />
+                <Label Grid.Row="2" Grid.Column="0" Target="{Binding ElementName=VoxelSizeZ}">Z</Label>
+                <TextBox Grid.Row="2" Grid.Column="1" x:Name="VoxelSizeZ" Text="{Binding VoxelDimensionZ}" />
+            </Grid>
+            <CheckBox Content="Flip X-Y axis" IsChecked="{Binding FlipXY}" />
+            <Button Command="{Binding LoadFromVoxelFileCommand}" Content="Run" />
+        </StackPanel>
     </Grid>
 </UserControl>
