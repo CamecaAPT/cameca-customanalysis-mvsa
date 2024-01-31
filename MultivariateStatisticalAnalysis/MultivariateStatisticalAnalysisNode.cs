@@ -2,7 +2,9 @@
 using Cameca.CustomAnalysis.Utilities;
 using CommunityToolkit.HighPerformance;
 using System;
+using System.CodeDom;
 using System.Collections.Generic;
+using System.Configuration;
 using System.IO;
 using System.Linq;
 using System.Numerics;
@@ -14,37 +16,53 @@ namespace MultivariateStatisticalAnalysis;
 internal class MultivariateStatisticalAnalysisNode : AnalysisFilterNodeBase
 {
     public const string UniqueId = "MultivariateStatisticalAnalysis.MultivariateStatisticalAnalysisNode";
-
+    private readonly IMassSpectrumRangeManagerProvider rangeManagerProvider;
     private PhaseMapper? phaseMapper = null;
+    private IMassSpectrumRangeManager? rangeManager;
 
     public static INodeDisplayInfo DisplayInfo { get; } = new NodeDisplayInfo("Multivariate Statistical Analysis");
 
-    public MultivariateStatisticalAnalysisNode(IAnalysisFilterNodeBaseServices services)
+    public MultivariateStatisticalAnalysisNode(IAnalysisFilterNodeBaseServices services, IMassSpectrumRangeManagerProvider rangeManagerProvider)
         : base(services)
     {
+        this.rangeManagerProvider = rangeManagerProvider;
     }
 
     protected override IEnumerable<ReadOnlyMemory<ulong>> GetIndicesDelegate(IIonData ownerIonData, IProgress<double>? progress, CancellationToken token)
     {
         if (phaseMapper is null || Properties is not MultivariateStatisticalAnalysisProperties { Phase: { } phase }) yield break;
 
-        // Our analysis philosophy is to generally compute on-demand
         // Ideally, this would be the spot where the input data could be passed to MATLAB, and MATLAB could return a phase identifier array or other data to be used for the filtering
-        // This is a little tricky to get at trivially, as our IIonData instance are accessed through a sequence of chunks of data
-        // This is mainly to circumvent issues with hitting single object size caps in C# and limits on array length (i.e. support data sets with ion counts > Int32.MaxValue)
-        // There should be some samples on the GitHub if necessary, but it's probably safe to just assume < 2 billion ions and load all into arrays
-        // Note that this could fail on massive datasets if not eventually adjusted to support them
-        Vector3[] positions = new Vector3[(int)ownerIonData.IonCount];
-        float[] masses = new float[(int)ownerIonData.IonCount];
-        int chunkOffset = 0;
-        foreach (var chunk in ownerIonData.CreateSectionDataEnumerable(IonDataSectionName.Position, IonDataSectionName.Mass))
-        {
-            var chunkPos = chunk.ReadSectionData<Vector3>(IonDataSectionName.Position);
-            var chunkMas = chunk.ReadSectionData<float>(IonDataSectionName.Mass);
-            chunkPos.Span.CopyTo(positions.AsSpan().Slice(chunkOffset));
-            chunkMas.Span.CopyTo(masses.AsSpan().Slice(chunkOffset));
-            chunkOffset += (int)chunk.Length;
-        }
+        (Vector3[] positions, float[] masses, byte[] ionTypes) = ownerIonData.LoadStandardSectionsAsArray();
+        (float[] xPositions, float[] yPositions, float[] zPositions) = positions.Decompose();
+        // represents minimum and maximum boundary containing all positions
+        var extents = ownerIonData.Extents;
+        var ionTypeInfo = ownerIonData.Ions;
+        var ranges = GetRanges(ionTypeInfo);
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        /*
+        At this point we have:
+         xPositions: float[] the X position of each ion
+         yPositions: float[] the X position of each ion
+         ZPositions: float[] the X position of each ion
+         masses: float[] representing the mass/charge ratio of each ion
+         extents: object containing a min and max vector3 defining the boundary of the position data
+         ionTypes: byte[] representing the assigned ion type for each ion (or 255 if unassigned)
+                   (note that due to the AP Suite "spatial ranging" feature, this can sometimes be different than directly applying the range information to the masses array)
+         ionTypeInfo: an array of object containing ion type information to be used with the ionTypes array
+                      The value of each byte in the ionTypes array (<255) corresponds to the index in this ionTypeInfo array
+                      e.g. The name of the first ion in the dataset would given by `ionTypeInfo[ionTypes[0]].Name` although do note generally to filter out 255 unassigned ions first
+                      The actual objects in ionTypeInfo are instance of IIonTypeInfo, and this can be used elsewhere for other information
+         ranges: an array that should be similar to a RRNG file. Each list element is a tuple (string Name, double Min, double Max)
+                 where Name is the name of the ion for the range, and Min/Max define low and high bounds of the range.
+                 Ordered in ascending order by Min bound or range.
+
+        All of this put together should roughly be essentially the same amount of information that can be parsed from directly loading an APT file and corresponding RRNG file
+        */
+
+
+        // Here's an example of where we could call into MATLAB tools. Hopefully the above data objects are converted into sufficiently simply primitive representations that can be passed to MATLAB
 
         /*
         using (dynamic eng = MATLABEngine.StartMATLAB())
@@ -60,10 +78,14 @@ internal class MultivariateStatisticalAnalysisNode : AnalysisFilterNodeBase
             // Then the LoadFromVoxelFile method can essentially be replaced with this information
         }
         MATLABEngine.TerminateEngineClient();
-        */
+        //*/
+
+        // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 
         // And at this point we have the phase information for applying back to the ions
-
+        // This function just expect an ascending array of ion indices from the original dataset to return for further analysis.
+        // I'm using an example of selecting a specific phase
         ulong index = 0L;
         // I'll just allocate a large enough array, then return only what we need
         var filteredIndices = new ulong[positions.Length];
@@ -130,6 +152,7 @@ internal class MultivariateStatisticalAnalysisNode : AnalysisFilterNodeBase
     protected override void OnAdded(NodeAddedEventArgs eventArgs)
     {
         base.OnAdded(eventArgs);
+        rangeManager = rangeManagerProvider.Resolve(InstanceId);
         var properties = new MultivariateStatisticalAnalysisProperties();
         properties.PropertyChanged += Properties_PropertyChanged;
         Properties = properties;
@@ -146,6 +169,18 @@ internal class MultivariateStatisticalAnalysisNode : AnalysisFilterNodeBase
         {
             DataStateIsValid = false;
         }
+    }
+
+    private (string Name, double Min, double Max)[] GetRanges(IReadOnlyCollection<IIonTypeInfo> ionTypeInfo)
+    {
+        if (rangeManager is null) return Array.Empty<(string Name, double Min, double Max)>();
+        var typeRanges = rangeManager.GetRanges();
+        IEnumerable<(string Name, double Min, double Max)> basicRanges = new List<(string Name, double Min, double Max)>();
+        foreach (var info in ionTypeInfo)
+        {
+            basicRanges = basicRanges.Concat(typeRanges[info.Formula].Ranges.Select(r => (info.Name, r.Min, r.Max)));
+        }
+        return basicRanges.OrderBy(r => r.Min).ToArray();
     }
 
     /// <summary>
